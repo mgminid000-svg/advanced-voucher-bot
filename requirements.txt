@@ -1,0 +1,5 @@
+pyTelegramBotAPI==4.14.0
+aiohttp==3.9.5
+ddddocr==1.7.5
+opencv-python-headless==4.10.0.84
+numpy==1.26.4
