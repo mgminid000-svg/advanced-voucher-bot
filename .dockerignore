@@ -12,3 +12,5 @@ env
 .vscode
 .idea
 *.log
+auth_list.json
+result.json
