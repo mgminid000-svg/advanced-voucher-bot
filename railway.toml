@@ -1,5 +1,13 @@
 [build]
-builder = "Nixpacks"
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
 
 [deploy]
-start = "python3 bot.py"
+startCommand = "python bot_time_new.py"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+healthcheckPath = "/"
+healthcheckTimeout = 30
+
+[service]
+internalPort = 8099
