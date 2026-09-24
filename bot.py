@@ -47,35 +47,48 @@ async def handle(request):
     return web.Response(text="Bot is awake and running 24/7!")
 
 async def web_server():
-    app = web.Application()
-    app.router.add_get('/', handle)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.environ.get('BOT_PORT', 8099))
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
+    try:
+        app = web.Application()
+        app.router.add_get('/', handle)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        # Railway က PORT ကို dynamic ပေးတယ်
+        port = int(os.environ.get('PORT', os.environ.get('BOT_PORT', 8099)))
+        site = web.TCPSite(runner, '0.0.0.0', port)
+        await site.start()
+        print(f"✅ Web server started on port {port}")
+    except Exception as e:
+        print(f"❌ Web server error: {e}")
 
 # ── GitHub helpers ─────────────────────────────────────────────────────────
 async def get_file_content(path):
-    url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{path}"
-    headers = {"Authorization": f"token {GITHUB_TOKEN}"}
-    async with session.get(url, headers=headers) as response:
-        if response.status == 200:
-            data = await response.json()
-            content = base64.b64decode(data['content']).decode('utf-8')
-            return json.loads(content), data['sha']
-    return {}, None
+    try:
+        url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{path}"
+        headers = {"Authorization": f"token {GITHUB_TOKEN}"}
+        async with session.get(url, headers=headers) as response:
+            if response.status == 200:
+                data = await response.json()
+                content = base64.b64decode(data['content']).decode('utf-8')
+                return json.loads(content), data['sha']
+        return {}, None
+    except Exception as e:
+        print(f"[get_file_content] error: {e}")
+        return {}, None
 
 async def update_file_content(path, content, sha, message):
-    url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{path}"
-    headers = {
-        "Authorization": f"token {GITHUB_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    encoded = base64.b64encode(json.dumps(content).encode()).decode()
-    payload = {"message": message, "content": encoded, "sha": sha}
-    async with session.put(url, headers=headers, json=payload) as response:
-        return await response.text()
+    try:
+        url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{path}"
+        headers = {
+            "Authorization": f"token {GITHUB_TOKEN}",
+            "Content-Type": "application/json"
+        }
+        encoded = base64.b64encode(json.dumps(content).encode()).decode()
+        payload = {"message": message, "content": encoded, "sha": sha}
+        async with session.put(url, headers=headers, json=payload) as response:
+            return await response.text()
+    except Exception as e:
+        print(f"[update_file_content] error: {e}")
+        return None
 
 # ── Helper functions ───────────────────────────────────────────────────────
 def check_key_expiration(expiration_time):
@@ -220,7 +233,7 @@ async def get_balance(token):
         print(f"[get_balance] error for {token}: {e}")
         return "N/A"
 
-# ── New mode-based code iterator ──────────────────────────────────────────
+# ── Mode-based code iterator ─────────────────────────────────────────────
 MODE_DESCRIPTIONS = {
     "1": ("0-9", string.digits),
     "2": ("a-z", string.ascii_lowercase),
@@ -238,7 +251,6 @@ def get_mode_total(mode, length):
     return len(get_mode_charset(mode)) ** length
 
 def iter_codes(mode, length):
-    """Yield all codes systematically for the given mode and length."""
     chars = get_mode_charset(mode)
     for combo in itertools.product(chars, repeat=length):
         yield "".join(combo)
@@ -261,16 +273,20 @@ def format_progress(checked, total=None, speed=0, found=0, target=None):
 _ocr = ddddocr.DdddOcr(show_ad=False)
 
 def _ocr_sync(image_bytes):
-    nparr = np.frombuffer(image_bytes, np.uint8)
-    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    if img is None:
+    try:
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None:
+            return None
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        blur = cv2.GaussianBlur(gray, (3, 3), 0)
+        _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        _, buffer = cv2.imencode('.png', thresh)
+        result = _ocr.classification(buffer.tobytes())
+        return result.upper() if result else None
+    except Exception as e:
+        print(f"[_ocr_sync] error: {e}")
         return None
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (3, 3), 0)
-    _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    _, buffer = cv2.imencode('.png', thresh)
-    result = _ocr.classification(buffer.tobytes())
-    return result.upper() if result else None
 
 async def Captcha_Text(image_bytes):
     return await asyncio.to_thread(_ocr_sync, image_bytes)
@@ -633,6 +649,7 @@ async def help_cmd(message):
         "  3 = အင်္ဂလိပ်စာလုံးအကြီး (A-Z)\n"
         "  4 = စာလုံးအကြီး+အသေး (a-zA-Z)\n"
         "  5 = စာလုံး+ဂဏန်း (a-z, 0-9)\n"
+        "Length: 1 မှ 10\n"
         "ဥပမာ: `/brute 1 6 5`\n\n"
         "**၃။** `/status` – အခြေအနေကြည့်\n"
         "**၄။** `/stop` – ရပ်တန့်ခြင်း\n"
@@ -703,6 +720,7 @@ async def brute(message):
             "  3 = အင်္ဂလိပ်စာလုံးအကြီး (A-Z)\n"
             "  4 = စာလုံးအကြီး+အသေး (a-zA-Z)\n"
             "  5 = စာလုံး+ဂဏန်း (a-z, 0-9)\n\n"
+            "Length: 1 မှ 10\n"
             "ဥပမာ: `/brute 1 6 5`",
             parse_mode="Markdown"
         )
@@ -715,8 +733,8 @@ async def brute(message):
 
     try:
         length = int(args[2])
-        if length < 1 or length > 12:
-            await bot.reply_to(message, "Length သည် 1 မှ 12 အတွင်း ဖြစ်ရပါမည်။")
+        if length < 1 or length > 10:
+            await bot.reply_to(message, "Length သည် 1 မှ 10 အတွင်း ဖြစ်ရပါမည်။")
             return
     except ValueError:
         await bot.reply_to(message, "Length သည် ဂဏန်းဖြစ်ရပါမည်။")
@@ -873,7 +891,6 @@ async def delete_saved(message):
     success_messages.pop(chat_id, None)
     limited_messages.pop(chat_id, None)
 
-    # Remove from GitHub
     try:
         results, sha = await get_file_content("result.json")
         if str(chat_id) in results:
